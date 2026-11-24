@@ -16,34 +16,184 @@
 import {createClient} from 'https://esm.sh/@supabase/supabase-js@2';
 const supabase=createClient('https://laqqclrjivdhogkdyhxn.supabase.co','sb_publishable_8I6CmmuxqCxwTCpFUDBtbA_VY4iZ0En');
 const $=id=>document.getElementById(id);let currentUser=null,isAdmin=false,register=null,customers=[];
+const SYNC_INTERVAL_MS=30_000;
+let syncTimer=null,syncGeneration=0,saleSaving=false;
+const refreshQueues=new Map(),renderedRows=new WeakMap();
+
+function queueRefresh(read,background){
+ const user=currentUser;
+ if(!user)return;
+ const previous=refreshQueues.get(read);
+ if(background&&previous)return previous;
+ const generation=syncGeneration;
+ const active=()=>currentUser===user&&syncGeneration===generation;
+ const pending=(previous||Promise.resolve()).then(async()=>{
+  if(!active())return;
+  try{await read(active,background)}
+  catch(e){
+   if(!active())return;
+   if(background)console.warn('Falha na sincronização automática',e);
+   else err(e);
+  }
+ }).finally(()=>{
+  if(refreshQueues.get(read)===pending)refreshQueues.delete(read);
+ });
+ refreshQueues.set(read,pending);
+ return pending;
+}
+
+function refreshAll(background=false){
+ return Promise.all([refresh(background),refreshCustomersOrders(background)]);
+}
+
+function refreshRows(id,rows,background,render){
+ const element=$(id),snapshot=JSON.stringify(rows);
+ if(renderedRows.get(element)===snapshot)return;
+ if(background&&element.contains(document.activeElement))return;
+ render(element);
+ renderedRows.set(element,snapshot);
+}
+
+function updateSaleButton(){
+ $('submitSale').disabled=saleSaving||!register||register.closed;
+}
+
 const today=()=>{const p=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));return `${p.year}-${p.month}-${p.day}`};
 function alertUser(message,ok=false){const n=$('notice');n.textContent=message;n.style.display='block';n.style.borderBottom='3px solid '+(ok?'#238a4e':'#d51d33');window.scrollTo({top:0,behavior:'smooth'});setTimeout(()=>{n.style.display='none'},6500)}
 function err(e){alertUser(e?.message||String(e))}function money(v){return Number(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'})}function cell(tr,value){const td=document.createElement('td');td.textContent=String(value??'');tr.append(td)}function showTab(name){document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('hidden',x.id!==name))}
 async function call(name,args){const {data,error}=await supabase.rpc(name,args);if(error)throw error;return data}
-async function refresh(){if(!currentUser)return;try{const c=await supabase.from('cash_registers').select('day,closed,opening_cash,counted_cash').eq('day',today()).maybeSingle();if(c.error)throw c.error;register=c.data;const status=!register?'Caixa ainda não aberto':register.closed?'Caixa encerrado':'Caixa aberto';$('dayState').textContent=today()+' • '+status;$('cashState').textContent=status;$('submitSale').disabled=!register||register.closed;$('openForm').classList.toggle('hidden',!!register);$('closeForm').classList.toggle('hidden',!register||register.closed);$('movementForm').classList.toggle('hidden',!register||register.closed);if(isAdmin){const s=await call('daily_financial_summary',{p_day:today()});const fields=[['Faturamento',money(s.revenue)],['Vendas',s.sales_count],['Pix',money(s.payments.pix)],['Dinheiro',money(s.payments.cash)],['Débito',money(s.payments.debit)],['Crédito',money(s.payments.credit)],['Taxas',money(s.card_fees)],['Custo de produtos',money(s.product_cost)],['Lucro de vendas antes das despesas',money(s.sales_profit_before_expenses)],['Dinheiro esperado em caixa',money(s.expected_cash)],['Diferença de caixa',s.cash_difference==null?'Aguardando fechamento':money(s.cash_difference)]];$('metrics').replaceChildren();fields.forEach(([name,value])=>{let box=document.createElement('div');box.className='panel';let title=document.createElement('div');title.className='muted';title.textContent=name;let stat=document.createElement('div');stat.className='stat';stat.textContent=value;box.append(title,stat);$('metrics').append(box)});const salesHistory=await supabase.from('store_records').select('created_at,payload').eq('kind','sale').order('created_at',{ascending:false}).limit(100);if(salesHistory.error)throw salesHistory.error;renderSalesHistory(salesHistory.data);const fees=await supabase.from('payment_fees').select('method,installments,rate').order('method').order('installments');if(fees.error)throw fees.error;$('feeRows').replaceChildren();(fees.data||[]).forEach(x=>{const tr=document.createElement('tr');cell(tr,x.method);cell(tr,x.installments);cell(tr,x.rate);$('feeRows').append(tr)});const staff=await call('safe_staff_directory');$('staffRows').replaceChildren();(staff||[]).forEach(x=>{let tr=document.createElement('tr');cell(tr,x.username);cell(tr,x.role);cell(tr,x.active?'Ativo':'Inativo');const td=document.createElement('td');if(x.role!=='admin'){const b=document.createElement('button');b.type='button';b.className='secondary';b.textContent=x.active?'Desativar':'Reativar';b.onclick=async()=>{if(!confirm((x.active?'Desativar':'Reativar')+' acesso de '+x.username+'?'))return;b.disabled=true;try{await call('set_staff_access',{p_username:x.username,p_active:!x.active});alertUser('Permissão atualizada.',true);await refresh()}catch(e){err(e)}finally{b.disabled=false}};td.append(b)}tr.append(td);$('staffRows').append(tr)})}else{$('metrics').textContent='O resumo financeiro detalhado é exclusivo do administrador.';const salesHistory=await supabase.from('store_records').select('created_at,payload').eq('kind','sale').order('created_at',{ascending:false}).limit(100);if(salesHistory.error)throw salesHistory.error;renderSalesHistory(salesHistory.data)}}catch(e){err(e)}}
+function refresh(background=false){return queueRefresh(readStore,background)}
+async function readStore(active,background){
+ const day=today();
+ const cash=await supabase.from('cash_registers').select('day,closed,opening_cash,counted_cash').eq('day',day).maybeSingle();
+ if(!active())return;
+ if(cash.error)throw cash.error;
+ register=cash.data;
+ const status=!register?'Caixa ainda não aberto':register.closed?'Caixa encerrado':'Caixa aberto';
+ $('dayState').textContent=day+' • '+status;
+ $('cashState').textContent=status;
+ updateSaleButton();
+ $('openForm').classList.toggle('hidden',!!register);
+ $('closeForm').classList.toggle('hidden',!register||register.closed);
+ $('movementForm').classList.toggle('hidden',!register||register.closed);
+
+ const history=await supabase.from('store_records').select('created_at,payload').eq('kind','sale').order('created_at',{ascending:false}).limit(100);
+ if(!active())return;
+ if(history.error)throw history.error;
+ refreshRows('historyRows',history.data,background,()=>renderSalesHistory(history.data));
+ if(!isAdmin){
+  renderedRows.delete($('metrics'));
+  $('metrics').textContent='O resumo financeiro detalhado é exclusivo do administrador.';
+  return;
+ }
+
+ const summary=await call('daily_financial_summary',{p_day:day});
+ if(!active())return;
+ const fields=[
+  ['Faturamento',money(summary.revenue)],['Vendas',summary.sales_count],
+  ['Pix',money(summary.payments.pix)],['Dinheiro',money(summary.payments.cash)],
+  ['Débito',money(summary.payments.debit)],['Crédito',money(summary.payments.credit)],
+  ['Taxas',money(summary.card_fees)],['Custo de produtos',money(summary.product_cost)],
+  ['Lucro de vendas antes das despesas',money(summary.sales_profit_before_expenses)],
+  ['Dinheiro esperado em caixa',money(summary.expected_cash)],
+  ['Diferença de caixa',summary.cash_difference==null?'Aguardando fechamento':money(summary.cash_difference)]
+ ];
+ refreshRows('metrics',fields,background,metrics=>{
+ metrics.replaceChildren();
+ fields.forEach(([name,value])=>{
+  const box=document.createElement('div'),title=document.createElement('div'),stat=document.createElement('div');
+  box.className='panel';
+  title.className='muted';
+  title.textContent=name;
+  stat.className='stat';
+  stat.textContent=value;
+  box.append(title,stat);
+  metrics.append(box);
+ });
+ });
+
+ const fees=await supabase.from('payment_fees').select('method,installments,rate').order('method').order('installments');
+ if(!active())return;
+ if(fees.error)throw fees.error;
+ refreshRows('feeRows',fees.data,background,table=>{
+  table.replaceChildren();
+  (fees.data||[]).forEach(x=>{
+   const tr=document.createElement('tr');
+   cell(tr,x.method);cell(tr,x.installments);cell(tr,x.rate);
+   table.append(tr);
+  });
+ });
+ const staff=await call('safe_staff_directory');
+ if(!active())return;
+ refreshRows('staffRows',staff,background,table=>{
+  table.replaceChildren();
+  (staff||[]).forEach(x=>{
+   const tr=document.createElement('tr'),td=document.createElement('td');
+   cell(tr,x.username);cell(tr,x.role);cell(tr,x.active?'Ativo':'Inativo');
+   if(x.role!=='admin'){
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='secondary';
+    button.textContent=x.active?'Desativar':'Reativar';
+    button.onclick=async()=>{
+     if(!confirm((x.active?'Desativar':'Reativar')+' acesso de '+x.username+'?'))return;
+     button.disabled=true;
+     try{
+      await call('set_staff_access',{p_username:x.username,p_active:!x.active});
+      alertUser('Permissão atualizada.',true);
+      await refresh();
+     }catch(e){err(e)}finally{button.disabled=false}
+    };
+    td.append(button);
+   }
+   tr.append(td);
+   table.append(tr);
+  });
+ });
+}
 function renderSalesHistory(rows){$('historyRows').replaceChildren();(rows||[]).forEach(x=>{const tr=document.createElement('tr');cell(tr,new Date(x.created_at).toLocaleString('pt-BR'));cell(tr,x.payload?.product||'Venda');cell(tr,x.payload?.quantity||'—');cell(tr,money(x.payload?.amount));$('historyRows').append(tr)})}
-async function start(){const {data:{user}}=await supabase.auth.getUser();currentUser=user;if(!user){$('login').classList.remove('hidden');$('app').classList.add('hidden');return}const {data:profile,error}=await supabase.from('profiles').select('username,role,active').eq('id',user.id).single();if(error||!profile?.active){await supabase.auth.signOut();currentUser=null;$('login').classList.remove('hidden');$('app').classList.add('hidden');alertUser('Seu acesso não está ativo ou não foi configurado.');return}const {data:staff,error:staffError}=await supabase.from('staff_profiles').select('active').eq('user_id',user.id).maybeSingle();if(staffError||!staff?.active){await supabase.auth.signOut();currentUser=null;$('login').classList.remove('hidden');$('app').classList.add('hidden');alertUser('Acesso desativado ou sem perfil de equipe.');return}isAdmin=profile.role==='admin';$('identity').textContent=profile.username+' • '+(isAdmin?'Administrador':'Funcionário');document.querySelectorAll('.admin').forEach(x=>x.classList.toggle('hidden',!isAdmin));$('login').classList.add('hidden');$('app').classList.remove('hidden');showTab('dashboard');await refresh();await refreshCustomersOrders()}
+function stopSync(){
+ clearInterval(syncTimer);
+ syncGeneration++;
+ refreshQueues.clear();
+ currentUser=null;
+ register=null;
+ updateSaleButton();
+}
+async function start(){stopSync();const {data:{user}}=await supabase.auth.getUser();if(!user){$('login').classList.remove('hidden');$('app').classList.add('hidden');return}const {data:profile,error}=await supabase.from('profiles').select('username,role,active').eq('id',user.id).single();if(error||!profile?.active){await supabase.auth.signOut();currentUser=null;$('login').classList.remove('hidden');$('app').classList.add('hidden');alertUser('Seu acesso não está ativo ou não foi configurado.');return}const {data:staff,error:staffError}=await supabase.from('staff_profiles').select('active').eq('user_id',user.id).maybeSingle();if(staffError||!staff?.active){await supabase.auth.signOut();currentUser=null;$('login').classList.remove('hidden');$('app').classList.add('hidden');alertUser('Acesso desativado ou sem perfil de equipe.');return}currentUser=user;isAdmin=profile.role==='admin';$('identity').textContent=profile.username+' • '+(isAdmin?'Administrador':'Funcionário');document.querySelectorAll('.admin').forEach(x=>x.classList.toggle('hidden',!isAdmin));$('login').classList.add('hidden');$('app').classList.remove('hidden');showTab('dashboard');syncTimer=setInterval(()=>refreshAll(true),SYNC_INTERVAL_MS);await refreshAll()}
 $('loginForm').onsubmit=async e=>{e.preventDefault();try{const {error}=await supabase.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error)throw error;$('password').value='';await start()}catch(e){err(e)}};
-$('logout').onclick=async()=>{await supabase.auth.signOut();currentUser=null;await start()};document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));$('refresh').onclick=async()=>{await refresh();await refreshCustomersOrders()};
+$('logout').onclick=async()=>{stopSync();await supabase.auth.signOut();await start()};document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>showTab(b.dataset.tab));$('refresh').onclick=()=>refreshAll();
 function addPayment(){if($('paymentRows').children.length>=4){alertUser('Limite de quatro formas de pagamento');return}const r=document.createElement('div');r.className='grid panel';r.innerHTML='<div><label>Forma</label><select class="method"><option value="pix">Pix</option><option value="dinheiro">Dinheiro</option><option value="debito">Débito</option><option value="credito">Crédito</option></select></div><div><label>Valor (R$)</label><input class="amount" type="number" min="0.01" step="0.01" required></div><div><label>Parcelas</label><select class="installments" disabled><option value="0">Não se aplica</option></select></div><div><label>Ação</label><button type="button" class="secondary remove">Remover</button></div>';r.querySelector('.method').onchange=e=>{const s=r.querySelector('.installments');s.replaceChildren();if(e.target.value==='credito'){s.disabled=false;for(let i=1;i<=21;i++)s.add(new Option(i+'x',i))}else{s.disabled=true;s.add(new Option('Não se aplica',0))}};r.querySelector('.remove').onclick=()=>r.remove();$('paymentRows').append(r)}$('addPayment').onclick=addPayment;addPayment();
-$('saleForm').onsubmit=async e=>{e.preventDefault();const b=$('submitSale');if(!confirm('Confirmar venda sem movimentar estoque?'))return;b.disabled=true;try{const payments=[...$('paymentRows').children].map(r=>({method:r.querySelector('.method').value,amount:Number(r.querySelector('.amount').value).toFixed(2),installments:Number(r.querySelector('.installments').value)}));const total=Number($('saleTotal').value);const paid=payments.reduce((n,p)=>n+Math.round(Number(p.amount)*100),0);if(paid!==Math.round(total*100))throw Error('A soma dos pagamentos deve ser igual ao total da venda.');await call('register_free_sale',{p_product:$('saleProduct').value.trim(),p_quantity:Number($('saleQty').value),p_total:total,p_payments:payments,p_description:$('saleDescription').value});alertUser('Venda registrada com sucesso!',true);$('saleForm').reset();$('paymentRows').replaceChildren();addPayment();await refresh()}catch(e){err(e)}finally{b.disabled=false}};
+$('saleForm').onsubmit=async e=>{e.preventDefault();if(saleSaving||!register||register.closed)return;if(!confirm('Confirmar venda sem movimentar estoque?'))return;saleSaving=true;updateSaleButton();try{const payments=[...$('paymentRows').children].map(r=>({method:r.querySelector('.method').value,amount:Number(r.querySelector('.amount').value).toFixed(2),installments:Number(r.querySelector('.installments').value)}));const total=Number($('saleTotal').value);const paid=payments.reduce((n,p)=>n+Math.round(Number(p.amount)*100),0);if(paid!==Math.round(total*100))throw Error('A soma dos pagamentos deve ser igual ao total da venda.');await call('register_free_sale',{p_product:$('saleProduct').value.trim(),p_quantity:Number($('saleQty').value),p_total:total,p_payments:payments,p_description:$('saleDescription').value});alertUser('Venda registrada com sucesso!',true);$('saleForm').reset();$('paymentRows').replaceChildren();addPayment();await refresh()}catch(e){err(e)}finally{saleSaving=false;updateSaleButton()}};
 $('openForm').onsubmit=async e=>{e.preventDefault();try{const {error}=await supabase.from('cash_registers').insert({day:today(),opening_cash:Number($('openingCash').value),opened_by:currentUser.id,closed:false});if(error)throw error;alertUser('Caixa aberto',true);await refresh()}catch(e){err(e)}};
 $('movementForm').onsubmit=async e=>{e.preventDefault();const b=$('movementSubmit');if(!register||register.closed){alertUser('Caixa não está aberto');return}if(!confirm('Confirmar movimentação financeira?'))return;b.disabled=true;try{const amount=Number($('movementAmount').value);if(!Number.isFinite(amount)||amount<=0||Math.round(amount*100)!==amount*100&&Math.abs(Math.round(amount*100)-amount*100)>0.000001)throw Error('Valor inválido');await call('register_cash_movement',{p_kind:$('movementKind').value,p_amount:Number(amount.toFixed(2)),p_description:$('movementReason').value.trim()});alertUser('Movimentação registrada',true);$('movementForm').reset();await refresh()}catch(e){err(e)}finally{b.disabled=false}};
 $('closeForm').onsubmit=async e=>{e.preventDefault();if(!confirm('ATENÇÃO: o caixa será encerrado definitivamente. Deseja continuar?'))return;const button=e.submitter;if(button)button.disabled=true;try{await call('close_cash_register',{p_counted_cash:Number($('countedCash').value),p_notes:$('cashNotes').value});alertUser('Caixa encerrado',true);await refresh()}catch(e){err(e)}finally{if(button)button.disabled=false}};
 
 function waLink(phone,message){const digits=String(phone).replace(/\D/g,'');return 'https://wa.me/'+(digits.startsWith('55')?digits:'55'+digits)+'?text='+encodeURIComponent(message)}
-async function refreshCustomersOrders(){
- if(!currentUser)return;
- try{
- const [c,o]=await Promise.all([supabase.from('mv_customers').select('id,name,phone').order('name').limit(500),supabase.from('mv_work_orders').select('id,customer_id,kind,item,details,status,created_at').order('created_at',{ascending:false}).limit(300)]);
+function refreshCustomersOrders(background=false){return queueRefresh(readCustomersOrders,background)}
+async function readCustomersOrders(active,background){
+ const [c,o,eventsResult]=await Promise.all([supabase.from('mv_customers').select('id,name,phone').order('name').limit(500),supabase.from('mv_work_orders').select('id,customer_id,kind,item,details,status,created_at').order('created_at',{ascending:false}).limit(300),
+  supabase.from('mv_work_order_events').select('work_order_id,old_status,new_status,changed_at').order('changed_at',{ascending:false}).limit(150)
+ ]);
+ if(!active())return;
  if(c.error)throw c.error;if(o.error)throw o.error;customers=c.data||[];
- $('customerRows').replaceChildren();$('orderCustomer').replaceChildren();
- customers.forEach(x=>{const tr=document.createElement('tr');cell(tr,x.name);cell(tr,x.phone);$('customerRows').append(tr);$('orderCustomer').add(new Option(x.name+' — '+x.phone,x.id))});
- $('orderRows').replaceChildren();
- const eventsResult=await supabase.from('mv_work_order_events').select('work_order_id,old_status,new_status,changed_at').order('changed_at',{ascending:false}).limit(150);
+ refreshRows('customerRows',customers,background,table=>{
+  table.replaceChildren();
+  customers.forEach(x=>{const tr=document.createElement('tr');cell(tr,x.name);cell(tr,x.phone);table.append(tr)});
+ });
+ refreshRows('orderCustomer',customers,background,select=>{
+  const selected=select.value;
+  select.replaceChildren(...customers.map(x=>new Option(x.name+' — '+x.phone,x.id)));
+  if(selected)select.value=selected;
+ });
+
  if(eventsResult.error)throw eventsResult.error;
- $('orderEventRows').replaceChildren();
- (eventsResult.data||[]).forEach(ev=>{const tr=document.createElement('tr');cell(tr,new Date(ev.changed_at).toLocaleString('pt-BR'));const order=(o.data||[]).find(x=>x.id===ev.work_order_id);cell(tr,order?.item||ev.work_order_id.slice(0,8));cell(tr,ev.old_status||'Criação');cell(tr,ev.new_status);$('orderEventRows').append(tr)});
+ refreshRows('orderEventRows',[eventsResult.data,o.data],background,table=>{
+ table.replaceChildren();
+ (eventsResult.data||[]).forEach(ev=>{const tr=document.createElement('tr');cell(tr,new Date(ev.changed_at).toLocaleString('pt-BR'));const order=(o.data||[]).find(x=>x.id===ev.work_order_id);cell(tr,order?.item||ev.work_order_id.slice(0,8));cell(tr,ev.old_status||'Criação');cell(tr,ev.new_status);table.append(tr)});
+ });
+ refreshRows('orderRows',[o.data,customers],background,table=>{
+ table.replaceChildren();
  (o.data||[]).forEach(x=>{
  const c=customers.find(c=>c.id===x.customer_id),tr=document.createElement('tr');
  cell(tr,new Date(x.created_at).toLocaleDateString('pt-BR'));cell(tr,x.kind==='assistencia'?'Assistência':'Pedido');cell(tr,c?.name||'Cliente');cell(tr,x.item);
@@ -54,9 +204,9 @@ async function refreshCustomersOrders(){
  td.append(sel);tr.append(td);
  const contact=document.createElement('td');
  if(c?.phone){const a=document.createElement('a');a.href=waLink(c.phone,'Olá, '+c.name+'! Aqui é da MV Celular. '+(x.kind==='assistencia'?'Seu aparelho':'Seu pedido')+' ('+x.item+') está '+(x.status==='pronto'?'pronto para retirada':'em acompanhamento')+'.');a.target='_blank';a.rel='noopener noreferrer';a.textContent='Abrir WhatsApp';a.style.color='#72dc9a';contact.append(a)}
- tr.append(contact);$('orderRows').append(tr)
+ tr.append(contact);table.append(tr)
  });
- }catch(e){err(e)}
+ });
 }
 $('customerForm').onsubmit=async e=>{e.preventDefault();try{
  const phone=$('customerPhone').value.replace(/\D/g,'');if(!/^(55)?[1-9][0-9][0-9]{8,9}$/.test(phone))throw Error('Informe telefone brasileiro com DDD válido');
