@@ -1,0 +1,2 @@
+CREATE DATABASE loja_test;
+CREATE DATABASE loja_e2e;

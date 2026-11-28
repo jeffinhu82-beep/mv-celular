@@ -1,0 +1,56 @@
+name: ${COMPOSE_PROJECT_NAME:-loja-assistencia}
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-loja}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-loja}
+      POSTGRES_DB: ${POSTGRES_DB:-loja}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${DB_PORT:-55490}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./docker/init-databases.sql:/docker-entrypoint-initdb.d/10-init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-loja} -d ${POSTGRES_DB:-loja}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-loja}:${POSTGRES_PASSWORD:-loja}@postgres:5432/${POSTGRES_DB:-loja}
+      SESSION_SECRET: ${SESSION_SECRET}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      API_PORT: 3390
+      API_HOST: 0.0.0.0
+    volumes:
+      - uploads:/app/apps/api/uploads
+    ports:
+      - "127.0.0.1:${API_PORT:-3390}:3390"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5190}:80"
+
+volumes:
+  pgdata:
+  uploads:

@@ -1,0 +1,43 @@
+{
+  "name": "@loja/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "dotenv -e ../../.env -- tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "migrate": "dotenv -e ../../.env -- prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "generate": "prisma generate",
+    "seed": "dotenv -e ../../.env -- tsx prisma/seed.ts",
+    "test": "dotenv -e ../../.env -- vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json",
+    "build": "prisma generate",
+    "db:reset": "dotenv -e ../../.env -- sh -c 'prisma migrate reset --force && tsx prisma/seed.ts'",
+    "bootstrap": "tsx prisma/bootstrap.ts",
+    "e2e:server": "dotenv -e ../../.env -- tsx scripts/e2e-server.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "11.1.5",
+    "@fastify/cors": "11.4.3",
+    "@fastify/multipart": "^10.1.9",
+    "@fastify/rate-limit": "11.3.0",
+    "@fastify/static": "^11.0.0",
+    "@loja/shared": "workspace:*",
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
+    "argon2": "0.45.2",
+    "fastify": "5.12.8",
+    "pg": "^8.23.1",
+    "tsx": "4.23.15",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.7",
+    "@types/pg": "^8.23.1",
+    "dotenv-cli": "^11.1.0",
+    "prisma": "7.10.1",
+    "vitest": "5.1.2"
+  }
+}

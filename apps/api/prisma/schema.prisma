@@ -1,0 +1,515 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ProductType {
+  product
+  service
+}
+
+enum StockMovementType {
+  purchase
+  sale
+  os_use
+  adjust
+  reversal
+}
+
+enum PaymentMethod {
+  cash
+  pix
+  debit
+  credit
+}
+
+enum CashSessionStatus {
+  open
+  closed
+}
+
+enum CashMovementType {
+  payment
+  income
+  supply
+  withdrawal
+  expense
+  reversal
+}
+
+enum SaleStatus {
+  quote
+  completed
+  pending
+  cancelled
+}
+
+enum SaleOrigin {
+  counter
+  os
+}
+
+enum StageType {
+  entry
+  in_progress
+  ready
+  done
+  cancelled
+}
+
+enum WhatsappTrigger {
+  on_move
+  manual
+}
+
+enum OsItemKind {
+  part
+  service
+  labor
+}
+
+model StoreSettings {
+  id                  String   @id @default(uuid()) @db.Uuid
+  name                String
+  document            String?
+  address             String?
+  whatsapp            String?
+  logoUrl             String?
+  pixKey              String?
+  openingHours        String?
+  warrantyDays        Int      @default(90)
+  quoteValidityDays   Int      @default(7)
+  staleOsDays         Int      @default(3)
+  staleQuoteDays      Int      @default(3)
+  maxInstallments     Int      @default(12)
+  minInstallmentCents Int      @default(0)
+  printDefaultSize    String   @default("80mm")
+  warrantyTerms       String   @default("")
+  entryTerms          String   @default("")
+  receiptFooter       String   @default("")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model Role {
+  id               String           @id @default(uuid()) @db.Uuid
+  slug             String?          @unique
+  name             String           @unique
+  discountLimitBps Int              @default(0)
+  system           Boolean          @default(false)
+  permissions      RolePermission[]
+  users            User[]
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+}
+
+model RolePermission {
+  roleId        String   @db.Uuid
+  permissionKey String
+  role          Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now())
+
+  @@id([roleId, permissionKey])
+}
+
+model User {
+  id                 String    @id @default(uuid()) @db.Uuid
+  name               String
+  login              String    @unique
+  email              String?   @unique
+  passwordHash       String
+  roleId             String    @db.Uuid
+  role               Role      @relation(fields: [roleId], references: [id])
+  active             Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  sessions           Session[]
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([roleId])
+}
+
+model Session {
+  id         String   @id
+  userId     String   @db.Uuid
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  lastSeenAt DateTime @default(now())
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Customer {
+  id            String         @id @default(uuid()) @db.Uuid
+  name          String
+  phoneE164     String
+  cpf           String?
+  email         String?
+  address       String?
+  notes         String?
+  anonymizedAt  DateTime?
+  createdById   String?        @db.Uuid
+  sales         Sale[]
+  serviceOrders ServiceOrder[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([phoneE164])
+  @@index([cpf])
+}
+
+model Category {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String    @unique
+  products  Product[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Product {
+  id               String             @id @default(uuid()) @db.Uuid
+  type             ProductType        @default(product)
+  name             String
+  sku              String?            @unique
+  barcode          String?            @unique
+  categoryId       String?            @db.Uuid
+  category         Category?          @relation(fields: [categoryId], references: [id])
+  costCents        Int                @default(0)
+  priceCents       Int                @default(0)
+  stockQty         Int                @default(0)
+  minStock         Int                @default(0)
+  tracksStock      Boolean            @default(true)
+  active           Boolean            @default(true)
+  estimatedMinutes Int?
+  photoUrl         String?
+  createdById      String?            @db.Uuid
+  movements        StockMovement[]
+  saleItems        SaleItem[]
+  osItems          ServiceOrderItem[]
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@index([categoryId])
+}
+
+model StockMovement {
+  id            String            @id @default(uuid()) @db.Uuid
+  productId     String            @db.Uuid
+  product       Product           @relation(fields: [productId], references: [id])
+  type          StockMovementType
+  qty           Int
+  unitCostCents Int               @default(0)
+  balanceAfter  Int               @default(0)
+  reason        String?
+  supplier      String?
+  refType       String?
+  refId         String?           @db.Uuid
+  refNumber     String?
+  userId        String?           @db.Uuid
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([productId])
+}
+
+model FeeRule {
+  id             String        @id @default(uuid()) @db.Uuid
+  method         PaymentMethod
+  installments   Int           @default(1)
+  percentBps     Int           @default(0)
+  fixedCents     Int           @default(0)
+  passToCustomer Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([method, installments])
+}
+
+model CashSession {
+  id                String            @id @default(uuid()) @db.Uuid
+  status            CashSessionStatus @default(open)
+  openedById        String            @db.Uuid
+  openedAt          DateTime
+  openingCents      Int
+  closedById        String?           @db.Uuid
+  closedAt          DateTime?
+  countedCashCents  Int?
+  expectedCashCents Int?
+  expected          Json?
+  differenceCents   Int?
+  notes             String?
+  reopenedAt        DateTime?
+  reopenedById      String?           @db.Uuid
+  reopenReason      String?
+  movements         CashMovement[]
+  payments          Payment[]
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+}
+
+model CashMovement {
+  id           String           @id @default(uuid()) @db.Uuid
+  sessionId    String           @db.Uuid
+  session      CashSession      @relation(fields: [sessionId], references: [id])
+  type         CashMovementType
+  method       PaymentMethod    @default(cash)
+  amountCents  Int
+  feeCents     Int              @default(0)
+  fromDrawer   Boolean          @default(false)
+  categoryId   String?          @db.Uuid
+  category     ExpenseCategory? @relation(fields: [categoryId], references: [id])
+  description  String
+  refType      String?
+  refId        String?          @db.Uuid
+  refNumber    String?
+  paymentId    String?          @db.Uuid
+  payment      Payment?         @relation(fields: [paymentId], references: [id])
+  userId       String           @db.Uuid
+  approvedById String?          @db.Uuid
+  occurredAt   DateTime
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  @@index([sessionId])
+  @@index([categoryId])
+  @@index([paymentId])
+}
+
+model Sale {
+  id              String        @id @default(uuid()) @db.Uuid
+  number          String?       @unique
+  quoteNumber     String?       @unique
+  status          SaleStatus
+  origin          SaleOrigin    @default(counter)
+  serviceOrderId  String?       @unique @db.Uuid
+  serviceOrder    ServiceOrder? @relation(fields: [serviceOrderId], references: [id])
+  customerId      String?       @db.Uuid
+  customer        Customer?     @relation(fields: [customerId], references: [id])
+  sellerId        String        @db.Uuid
+  subtotalCents   Int
+  discountCents   Int           @default(0)
+  discountMode    String?
+  discountValue   Int?
+  totalCents      Int
+  paidCents       Int           @default(0)
+  costCents       Int           @default(0)
+  notes           String?
+  quoteValidUntil DateTime?
+  quoteCreatedAt  DateTime?
+  completedAt     DateTime?
+  cancelReason    String?
+  cancelledAt     DateTime?
+  cancelledById   String?       @db.Uuid
+  approvedById    String?       @db.Uuid
+  items           SaleItem[]
+  payments        Payment[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([customerId])
+  @@index([sellerId])
+}
+
+model SaleItem {
+  id             String      @id @default(uuid()) @db.Uuid
+  saleId         String      @db.Uuid
+  sale           Sale        @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  productId      String?     @db.Uuid
+  product        Product?    @relation(fields: [productId], references: [id])
+  kind           OsItemKind?
+  name           String
+  qty            Int
+  unitPriceCents Int
+  listPriceCents Int?
+  unitCostCents  Int         @default(0)
+  discountMode   String?
+  discountValue  Int?
+  discountCents  Int         @default(0)
+  totalCents     Int
+  tracksStock    Boolean     @default(false)
+  position       Int         @default(0)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+model Payment {
+  id             String         @id @default(uuid()) @db.Uuid
+  saleId         String?        @db.Uuid
+  sale           Sale?          @relation(fields: [saleId], references: [id])
+  serviceOrderId String?        @db.Uuid
+  serviceOrder   ServiceOrder?  @relation(fields: [serviceOrderId], references: [id])
+  cashSessionId  String         @db.Uuid
+  cashSession    CashSession    @relation(fields: [cashSessionId], references: [id])
+  method         PaymentMethod
+  installments   Int            @default(1)
+  amountCents    Int
+  coveredCents   Int
+  surchargeCents Int            @default(0)
+  feeCents       Int            @default(0)
+  feePercentBps  Int            @default(0)
+  changeCents    Int            @default(0)
+  receivedAt     DateTime
+  receivedById   String         @db.Uuid
+  reversedAt     DateTime?
+  movements      CashMovement[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([saleId])
+  @@index([serviceOrderId])
+  @@index([cashSessionId])
+}
+
+model ServiceOrder {
+  id                     String              @id @default(uuid()) @db.Uuid
+  number                 String              @unique
+  customerId             String              @db.Uuid
+  customer               Customer            @relation(fields: [customerId], references: [id])
+  deviceType             String
+  brand                  String
+  model                  String
+  color                  String?
+  serialImei             String?
+  unlockType             String              @default("none")
+  unlockSecretEnc        String?
+  accessories            String?
+  checklist              Json                @default("{}")
+  reportedIssue          String
+  diagnosis              String?
+  technicianId           String?             @db.Uuid
+  columnId               String              @db.Uuid
+  column                 KanbanColumn        @relation(fields: [columnId], references: [id])
+  columnEnteredAt        DateTime
+  position               Int                 @default(0)
+  dueAt                  DateTime?
+  discountCents          Int                 @default(0)
+  diagnosisFeeCents      Int                 @default(0)
+  approvalStatus         String?
+  approvalBy             String?
+  approvalAt             DateTime?
+  approvalChannel        String?
+  approvalRegisteredById String?             @db.Uuid
+  warrantyDays           Int                 @default(90)
+  deliveredAt            DateTime?
+  warrantyUntil          DateTime?
+  closedAt               DateTime?
+  parentOsId             String?             @db.Uuid
+  parentOs               ServiceOrder?       @relation("WarrantyReturn", fields: [parentOsId], references: [id])
+  returns                ServiceOrder[]      @relation("WarrantyReturn")
+  createdById            String              @db.Uuid
+  items                  ServiceOrderItem[]
+  events                 ServiceOrderEvent[]
+  payments               Payment[]
+  sale                   Sale?
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+
+  @@index([customerId])
+  @@index([technicianId])
+  @@index([columnId])
+  @@index([parentOsId])
+}
+
+model ServiceOrderItem {
+  id             String       @id @default(uuid()) @db.Uuid
+  serviceOrderId String       @db.Uuid
+  serviceOrder   ServiceOrder @relation(fields: [serviceOrderId], references: [id], onDelete: Cascade)
+  productId      String?      @db.Uuid
+  product        Product?     @relation(fields: [productId], references: [id])
+  kind           OsItemKind
+  name           String
+  qty            Int
+  unitPriceCents Int
+  unitCostCents  Int          @default(0)
+  position       Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([serviceOrderId])
+  @@index([productId])
+}
+
+model ServiceOrderEvent {
+  id             String       @id @default(uuid()) @db.Uuid
+  serviceOrderId String       @db.Uuid
+  serviceOrder   ServiceOrder @relation(fields: [serviceOrderId], references: [id], onDelete: Cascade)
+  type           String
+  fromColumnId   String?      @db.Uuid
+  toColumnId     String?      @db.Uuid
+  data           Json?
+  userId         String?      @db.Uuid
+  createdAt      DateTime     @default(now())
+
+  @@index([serviceOrderId])
+}
+
+model KanbanColumn {
+  id              String           @id @default(uuid()) @db.Uuid
+  name            String
+  color           String           @default("#8C8381")
+  order           Int              @default(0)
+  stageType       StageType
+  requiredFields  Json             @default("[]")
+  whatsappEnabled Boolean          @default(false)
+  whatsappTrigger WhatsappTrigger  @default(manual)
+  templateId      String?          @db.Uuid
+  template        MessageTemplate? @relation(fields: [templateId], references: [id])
+  archived        Boolean          @default(false)
+  serviceOrders   ServiceOrder[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([templateId])
+}
+
+model MessageTemplate {
+  id        String         @id @default(uuid()) @db.Uuid
+  name      String
+  body      String
+  columns   KanbanColumn[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+model ExpenseCategory {
+  id        String         @id @default(uuid()) @db.Uuid
+  name      String         @unique
+  active    Boolean        @default(true)
+  movements CashMovement[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+model AuditLog {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String?  @db.Uuid
+  approvedById String?  @db.Uuid
+  action       String
+  entity       String
+  entityId     String?
+  before       Json?
+  after        Json?
+  ip           String?
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Counter {
+  key       String   @id
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt
+}

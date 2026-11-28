@@ -1,0 +1,26 @@
+{
+  "name": "loja-assistencia",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm db:up && pnpm --parallel --filter @loja/api --filter @loja/web dev",
+    "db:up": "docker compose up -d postgres --wait",
+    "db:down": "docker compose stop postgres",
+    "migrate": "pnpm --filter @loja/api migrate",
+    "migrate:deploy": "pnpm --filter @loja/api migrate:deploy",
+    "seed": "pnpm --filter @loja/api seed",
+    "db:reset": "pnpm --filter @loja/api db:reset",
+    "test": "pnpm --filter @loja/shared test && pnpm --filter @loja/api test",
+    "test:unit": "pnpm --filter @loja/shared test",
+    "test:api": "pnpm --filter @loja/api test",
+    "test:e2e": "pnpm --filter @loja/web test:e2e",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "build": "pnpm -r build",
+    "backup": "sh scripts/backup.sh"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}
